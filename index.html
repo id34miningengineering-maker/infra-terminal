@@ -1,35 +1,33 @@
+
 <!DOCTYPE html>
 <html>
 <head>
-  <title>WAR ROOM TERMINAL</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="utf-8">
+<title>WAR ROOM TERMINAL</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <!-- Cesium 3D Globe -->
-  <script src="https://cesium.com/downloads/cesiumjs/releases/1.111/Build/Cesium/Cesium.js"></script>
-  <link href="https://cesium.com/downloads/cesiumjs/releases/1.111/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+<!-- Cesium 3D Globe -->
+<script src="https://cesium.com/downloads/cesiumjs/releases/1.111/Build/Cesium/Cesium.js"></script>
+<link href="https://cesium.com/downloads/cesiumjs/releases/1.111/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 
-  <!-- Leaflet 2D Map -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<!-- Leaflet 2D Map -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
-  <style>
-    body { margin:0; background:black; color:#0f0; font-family:monospace; }
-    #globe, #map { position:absolute; top:0; left:0; width:100%; height:100%; }
-    #map { display:none; }
-    .controls {
-      position:absolute;
-      top:10px;
-      left:10px;
-      z-index:999;
-      background:rgba(0,0,0,0.7);
-      padding:10px;
-      border:1px solid #0f0;
-    }
-    button { background:black; color:#0f0; border:1px solid #0f0; margin:2px; padding:5px; cursor:pointer; }
-    .layer-toggle { margin-top:5px; display:flex; flex-direction:column; }
-  </style>
+<!-- Satellite.js for TLE propagation -->
+<script src="https://unpkg.com/satellite.js/dist/satellite.min.js"></script>
+
+<style>
+body { margin:0; background:black; font-family:monospace; color:#0f0; }
+#globe,#map{position:absolute;top:0;left:0;width:100%;height:100%;}
+#map{display:none;}
+.controls{
+  position:absolute;top:10px;left:10px;z-index:999;background:rgba(0,0,0,0.7);padding:10px;border:1px solid #0f0;
+}
+button{background:black;color:#0f0;border:1px solid #0f0;margin:2px;padding:5px;cursor:pointer;}
+.layer-toggle{margin-top:5px;display:flex;flex-direction:column;}
+</style>
 </head>
-
 <body>
 
 <div class="controls">
@@ -51,38 +49,43 @@
 <div id="map"></div>
 
 <script>
-// ------- Utility -------
-function now() { return new Date().toLocaleTimeString(); }
+// ----------------- Utility -----------------
+function now(){return new Date().toLocaleTimeString();}
+const layers={aircraft:true,ships:true,satellites:true,weather:true,energy:true,aqi:true,disasters:true,fires:true};
+function toggleLayer(layer){layers[layer]=!layers[layer];refreshLayers();}
 
-// ------- Layer state -------
-const layers = {
-  aircraft:true,
-  ships:true,
-  satellites:true,
-  weather:true,
-  energy:true,
-  aqi:true,
-  disasters:true,
-  fires:true
-};
-function toggleLayer(layer) { layers[layer] = !layers[layer]; refreshLayers(); }
-
-// ------- CESIUM Globe -------
+// ----------------- CESIUM Globe -----------------
 Cesium.Ion.defaultAccessToken = "";
-const viewer = new Cesium.Viewer('globe',{timeline:false, animation:false});
 
-// Satellites (CelesTrak sample)
-let satEntities = [];
+const viewer = new Cesium.Viewer('globe',{
+  timeline:false,
+  animation:false,
+  imageryProvider:new Cesium.IonImageryProvider({assetId:3}),
+  baseLayerPicker:false
+});
+
+let satEntities=[],aircraftEntities=[],shipEntities=[],energyEntities=[],fireEntities=[];
+
+// -------- Satellites --------
 fetch("https://celestrak.org/NORAD/elements/stations.txt")
 .then(res=>res.text())
 .then(txt=>{
-  const lines = txt.split("\n");
+  const lines=txt.split("\n");
   for(let i=0;i<lines.length;i+=3){
-    let name = lines[i];
+    let name=lines[i];
     if(name){
+      let tle1=lines[i+1],tle2=lines[i+2];
+      let satrec=satellite.twoline2satrec(tle1,tle2);
+      let nowDate=new Date();
+      let gmst = satellite.gstime(nowDate);
+      let positionEci = satellite.propagate(satrec, nowDate);
+      let positionGd = satellite.eciToGeodetic(positionEci.position, gmst);
+      let lon = satellite.degreesLong(positionGd.longitude);
+      let lat = satellite.degreesLat(positionGd.latitude);
+      let alt = positionGd.height*1000;
       let e = viewer.entities.add({
         name:name,
-        position:Cesium.Cartesian3.fromDegrees(Math.random()*360-180, Math.random()*180-90, 400000),
+        position:Cesium.Cartesian3.fromDegrees(lon,lat,alt),
         point:{pixelSize:5,color:Cesium.Color.CYAN}
       });
       satEntities.push(e);
@@ -90,38 +93,46 @@ fetch("https://celestrak.org/NORAD/elements/stations.txt")
   }
 });
 
-// Aircraft (OpenSky)
-let aircraftEntities = [];
-fetch("https://opensky-network.org/api/states/all")
-.then(res=>res.json())
-.then(d=>{
-  d.states.slice(0,100).forEach(f=>{
-    if(f[5] && f[6]){
-      let e = viewer.entities.add({
-        position:Cesium.Cartesian3.fromDegrees(f[5],f[6],f[7]||10000),
-        point:{pixelSize:3,color:Cesium.Color.YELLOW}
-      });
-      aircraftEntities.push(e);
-    }
+// -------- Aircraft --------
+async function loadAircraft(){
+  try{
+    let res=await fetch("https://opensky-network.org/api/states/all");
+    let data=await res.json();
+    data.states.slice(0,100).forEach(f=>{
+      if(f[5]&&f[6]){
+        let e=viewer.entities.add({
+          position:Cesium.Cartesian3.fromDegrees(f[5],f[6],f[7]||10000),
+          point:{pixelSize:3,color:Cesium.Color.YELLOW}
+        });
+        aircraftEntities.push(e);
+      }
+    });
+  }catch(err){console.log(err);}
+}
+loadAircraft();
+
+// -------- Ships (sample free data) --------
+// For demonstration: random points over oceans
+for(let i=0;i<50;i++){
+  let lon=Math.random()*360-180;
+  let lat=Math.random()*140-70;
+  let e=viewer.entities.add({
+    name:"Ship "+i,
+    position:Cesium.Cartesian3.fromDegrees(lon,lat,0),
+    point:{pixelSize:3,color:Cesium.Color.BLUE}
   });
-});
+  shipEntities.push(e);
+}
 
-// Placeholder: Ships layer (if free feed available, populate aircraftEntities like above)
-let shipEntities = []; // Add fetch here when allowed
-
-// Placeholder: Energy / regional overlays
-let energyEntities = []; // could use colored polygons
-
-// Fires
-let fireEntities = [];
+// -------- Fires (NASA FIRMS) --------
 fetch("https://firms.modaps.eosdis.nasa.gov/data/active_fire/c6.1/csv/USA_contiguous_and_Hawaii_24h.csv")
-.then(res=>res.text())
+.then(r=>r.text())
 .then(txt=>{
-  let rows = txt.split("\n").slice(1,50);
+  let rows=txt.split("\n").slice(1,50);
   rows.forEach(r=>{
-    let c = r.split(",");
+    let c=r.split(",");
     if(c.length>3){
-      let e = viewer.entities.add({
+      let e=viewer.entities.add({
         position:Cesium.Cartesian3.fromDegrees(parseFloat(c[1]),parseFloat(c[0]),0),
         point:{pixelSize:4,color:Cesium.Color.RED}
       });
@@ -130,46 +141,61 @@ fetch("https://firms.modaps.eosdis.nasa.gov/data/active_fire/c6.1/csv/USA_contig
   });
 });
 
-// ------- LEAFLET Map -------
-const map = L.map('map').setView([20,0],2);
+// -------- Energy overlay (proxy) --------
+const energyPolys=[
+  {coords:[[40,-90],[45,-90],[45,-85],[40,-85]],color:Cesium.Color.ORANGE.withAlpha(0.3)}
+];
+energyPolys.forEach(p=>{
+  let e=viewer.entities.add({
+    polygon:{hierarchy:p.coords.map(c=>Cesium.Cartesian3.fromDegrees(c[1],c[0])),material:p.color}
+  });
+  energyEntities.push(e);
+});
+
+// ----------------- LEAFLET Map -----------------
+const map=L.map('map').setView([20,0],2);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
 // Aircraft markers
-let aircraftMarkers = [];
+let aircraftMarkers=[];
 fetch("https://opensky-network.org/api/states/all")
 .then(res=>res.json())
 .then(d=>{
   d.states.slice(0,50).forEach(f=>{
     if(f[5]&&f[6]){
-      let m = L.circleMarker([f[6],f[5]],{radius:3,color:'yellow'}).addTo(map);
+      let m=L.circleMarker([f[6],f[5]],{radius:3,color:'yellow'}).addTo(map);
       aircraftMarkers.push(m);
     }
   });
 });
 
-// Placeholder: Ships markers
-let shipMarkers = [];
+// Ships (random)
+let shipMarkers=[];
+for(let i=0;i<50;i++){
+  let m=L.circleMarker([Math.random()*140-70,Math.random()*360-180],{radius:3,color:'blue'}).addTo(map);
+  shipMarkers.push(m);
+}
 
-// Placeholder: Weather overlay (OpenWeather free key required)
-let weatherLayer = L.tileLayer('https://tile.openweathermap.org/map/precipitation_new/{z}/{x}/{y}.png?appid=YOUR_KEY',{opacity:0.5});
+// Weather overlay (OpenWeather free key required)
+let weatherLayer=L.tileLayer('https://tile.openweathermap.org/map/precipitation_new/{z}/{x}/{y}.png?appid=YOUR_KEY',{opacity:0.5});
 weatherLayer.addTo(map);
 
-// ------- Mode Switch -------
-function showGlobe(){ document.getElementById("globe").style.display="block"; document.getElementById("map").style.display="none"; }
-function showMap(){ document.getElementById("globe").style.display="none"; document.getElementById("map").style.display="block"; }
+// ----------------- Mode Switching -----------------
+function showGlobe(){document.getElementById("globe").style.display="block";document.getElementById("map").style.display="none";}
+function showMap(){document.getElementById("globe").style.display="none";document.getElementById("map").style.display="block";}
 
-// ------- Layer Refresh -------
+// ----------------- Layer Refresh -----------------
 function refreshLayers(){
   satEntities.forEach(e=>e.show=layers.satellites);
   aircraftEntities.forEach(e=>e.show=layers.aircraft);
   shipEntities.forEach(e=>e.show=layers.ships);
   fireEntities.forEach(e=>e.show=layers.fires);
-  // Leaflet layers
-  aircraftMarkers.forEach(m=>{ if(layers.aircraft)m.addTo(map); else map.removeLayer(m); });
-  shipMarkers.forEach(m=>{ if(layers.ships)m.addTo(map); else map.removeLayer(m); });
-  if(layers.weather){ weatherLayer.addTo(map); } else { map.removeLayer(weatherLayer); }
+  energyEntities.forEach(e=>e.show=layers.energy);
+
+  aircraftMarkers.forEach(m=>{if(layers.aircraft)m.addTo(map);else map.removeLayer(m);});
+  shipMarkers.forEach(m=>{if(layers.ships)m.addTo(map);else map.removeLayer(m);});
+  if(layers.weather){weatherLayer.addTo(map);}else{map.removeLayer(weatherLayer);}
 }
 </script>
-
 </body>
 </html>
