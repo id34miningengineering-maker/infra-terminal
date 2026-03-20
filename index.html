@@ -1,109 +1,174 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Infrastructure Terminal</title>
+  <title>WAR ROOM TERMINAL</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <!-- Cesium 3D Globe -->
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.111/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.111/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+
+  <!-- Leaflet 2D Map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
   <style>
-    body { margin:0; font-family: monospace; background:#000; color:#0f0; }
-    h1 { text-align:center; }
-    .grid {
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap:10px;
+    body { margin:0; background:black; color:#0f0; font-family:monospace; }
+    #globe, #map { position:absolute; top:0; left:0; width:100%; height:100%; }
+    #map { display:none; }
+    .controls {
+      position:absolute;
+      top:10px;
+      left:10px;
+      z-index:999;
+      background:rgba(0,0,0,0.7);
       padding:10px;
-    }
-    .panel {
       border:1px solid #0f0;
-      padding:10px;
-      height:220px;
-      overflow:auto;
     }
-    .title { font-weight:bold; margin-bottom:5px; }
-    .meta { font-size:10px; opacity:0.7; }
+    button { background:black; color:#0f0; border:1px solid #0f0; margin:2px; padding:5px; cursor:pointer; }
+    .layer-toggle { margin-top:5px; display:flex; flex-direction:column; }
   </style>
 </head>
+
 <body>
 
-<h1>INFRASTRUCTURE TERMINAL</h1>
-
-<div class="grid">
-  <div class="panel" id="energy"></div>
-  <div class="panel" id="outages"></div>
-  <div class="panel" id="aqi"></div>
-  <div class="panel" id="disasters"></div>
-  <div class="panel" id="flights"></div>
-  <div class="panel" id="fires"></div>
+<div class="controls">
+  <button onclick="showGlobe()">🌍 Globe</button>
+  <button onclick="showMap()">🗺️ Map</button>
+  <div class="layer-toggle">
+    <label><input type="checkbox" checked onchange="toggleLayer('aircraft')"> Aircraft</label>
+    <label><input type="checkbox" checked onchange="toggleLayer('ships')"> Ships</label>
+    <label><input type="checkbox" checked onchange="toggleLayer('satellites')"> Satellites</label>
+    <label><input type="checkbox" checked onchange="toggleLayer('weather')"> Weather</label>
+    <label><input type="checkbox" checked onchange="toggleLayer('energy')"> Energy</label>
+    <label><input type="checkbox" checked onchange="toggleLayer('aqi')"> Air Quality</label>
+    <label><input type="checkbox" checked onchange="toggleLayer('disasters')"> Disasters</label>
+    <label><input type="checkbox" checked onchange="toggleLayer('fires')"> Fires</label>
+  </div>
 </div>
 
+<div id="globe"></div>
+<div id="map"></div>
+
 <script>
-function now() {
-  return new Date().toLocaleTimeString();
-}
+// ------- Utility -------
+function now() { return new Date().toLocaleTimeString(); }
 
-// ENERGY (proxy using US demand estimate via EIA open endpoint fallback)
-document.getElementById("energy").innerHTML =
-  "<div class='title'>ENERGY (Proxy)</div>" +
-  "Grid visibility limited in browser<br>" +
-  "Use as placeholder for stress layer<br>" +
-  "<div class='meta'>Updated: "+now()+"</div>";
+// ------- Layer state -------
+const layers = {
+  aircraft:true,
+  ships:true,
+  satellites:true,
+  weather:true,
+  energy:true,
+  aqi:true,
+  disasters:true,
+  fires:true
+};
+function toggleLayer(layer) { layers[layer] = !layers[layer]; refreshLayers(); }
 
-// OUTAGES (proxy explanation)
-document.getElementById("outages").innerHTML =
-  "<div class='title'>OUTAGES</div>" +
-  "Public outage APIs restricted in browser<br>" +
-  "Future: backend integration<br>" +
-  "<div class='meta'>Updated: "+now()+"</div>";
+// ------- CESIUM Globe -------
+Cesium.Ion.defaultAccessToken = "";
+const viewer = new Cesium.Viewer('globe',{timeline:false, animation:false});
 
-// AIR QUALITY (OpenAQ)
-fetch("https://api.openaq.org/v2/latest?limit=5")
-.then(r=>r.json())
-.then(d=>{
-  let html = "<div class='title'>AIR QUALITY</div>";
-  d.results.forEach(c=>{
-    let v = c.measurements[0].value;
-    html += `${c.city}: AQI ~ ${Math.round(v)}<br>`;
-  });
-  html += "<div class='meta'>Updated: "+now()+"</div>";
-  document.getElementById("aqi").innerHTML = html;
+// Satellites (CelesTrak sample)
+let satEntities = [];
+fetch("https://celestrak.org/NORAD/elements/stations.txt")
+.then(res=>res.text())
+.then(txt=>{
+  const lines = txt.split("\n");
+  for(let i=0;i<lines.length;i+=3){
+    let name = lines[i];
+    if(name){
+      let e = viewer.entities.add({
+        name:name,
+        position:Cesium.Cartesian3.fromDegrees(Math.random()*360-180, Math.random()*180-90, 400000),
+        point:{pixelSize:5,color:Cesium.Color.CYAN}
+      });
+      satEntities.push(e);
+    }
+  }
 });
 
-// DISASTERS (Earthquakes)
-fetch("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson")
-.then(r=>r.json())
-.then(d=>{
-  let html = "<div class='title'>EARTHQUAKES</div>";
-  d.features.slice(0,8).forEach(eq=>{
-    html += `${eq.properties.place} M${eq.properties.mag}<br>`;
-  });
-  html += "<div class='meta'>Updated: "+now()+"</div>";
-  document.getElementById("disasters").innerHTML = html;
-});
-
-// FLIGHTS
+// Aircraft (OpenSky)
+let aircraftEntities = [];
 fetch("https://opensky-network.org/api/states/all")
-.then(r=>r.json())
+.then(res=>res.json())
 .then(d=>{
-  let html = "<div class='title'>FLIGHTS</div>";
-  d.states.slice(0,8).forEach(f=>{
-    html += `${f[1] || "N/A"} Alt:${Math.round(f[7]||0)}<br>`;
+  d.states.slice(0,100).forEach(f=>{
+    if(f[5] && f[6]){
+      let e = viewer.entities.add({
+        position:Cesium.Cartesian3.fromDegrees(f[5],f[6],f[7]||10000),
+        point:{pixelSize:3,color:Cesium.Color.YELLOW}
+      });
+      aircraftEntities.push(e);
+    }
   });
-  html += "<div class='meta'>Updated: "+now()+"</div>";
-  document.getElementById("flights").innerHTML = html;
 });
 
-// FIRES (NASA FIRMS public feed)
+// Placeholder: Ships layer (if free feed available, populate aircraftEntities like above)
+let shipEntities = []; // Add fetch here when allowed
+
+// Placeholder: Energy / regional overlays
+let energyEntities = []; // could use colored polygons
+
+// Fires
+let fireEntities = [];
 fetch("https://firms.modaps.eosdis.nasa.gov/data/active_fire/c6.1/csv/USA_contiguous_and_Hawaii_24h.csv")
-.then(r=>r.text())
-.then(t=>{
-  let rows = t.split("\n").slice(1,8);
-  let html = "<div class='title'>FIRES</div>";
+.then(res=>res.text())
+.then(txt=>{
+  let rows = txt.split("\n").slice(1,50);
   rows.forEach(r=>{
     let c = r.split(",");
-    if(c.length>3) html += `Lat:${c[0]} Lon:${c[1]}<br>`;
+    if(c.length>3){
+      let e = viewer.entities.add({
+        position:Cesium.Cartesian3.fromDegrees(parseFloat(c[1]),parseFloat(c[0]),0),
+        point:{pixelSize:4,color:Cesium.Color.RED}
+      });
+      fireEntities.push(e);
+    }
   });
-  html += "<div class='meta'>Updated: "+now()+"</div>";
-  document.getElementById("fires").innerHTML = html;
 });
+
+// ------- LEAFLET Map -------
+const map = L.map('map').setView([20,0],2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+// Aircraft markers
+let aircraftMarkers = [];
+fetch("https://opensky-network.org/api/states/all")
+.then(res=>res.json())
+.then(d=>{
+  d.states.slice(0,50).forEach(f=>{
+    if(f[5]&&f[6]){
+      let m = L.circleMarker([f[6],f[5]],{radius:3,color:'yellow'}).addTo(map);
+      aircraftMarkers.push(m);
+    }
+  });
+});
+
+// Placeholder: Ships markers
+let shipMarkers = [];
+
+// Placeholder: Weather overlay (OpenWeather free key required)
+let weatherLayer = L.tileLayer('https://tile.openweathermap.org/map/precipitation_new/{z}/{x}/{y}.png?appid=YOUR_KEY',{opacity:0.5});
+weatherLayer.addTo(map);
+
+// ------- Mode Switch -------
+function showGlobe(){ document.getElementById("globe").style.display="block"; document.getElementById("map").style.display="none"; }
+function showMap(){ document.getElementById("globe").style.display="none"; document.getElementById("map").style.display="block"; }
+
+// ------- Layer Refresh -------
+function refreshLayers(){
+  satEntities.forEach(e=>e.show=layers.satellites);
+  aircraftEntities.forEach(e=>e.show=layers.aircraft);
+  shipEntities.forEach(e=>e.show=layers.ships);
+  fireEntities.forEach(e=>e.show=layers.fires);
+  // Leaflet layers
+  aircraftMarkers.forEach(m=>{ if(layers.aircraft)m.addTo(map); else map.removeLayer(m); });
+  shipMarkers.forEach(m=>{ if(layers.ships)m.addTo(map); else map.removeLayer(m); });
+  if(layers.weather){ weatherLayer.addTo(map); } else { map.removeLayer(weatherLayer); }
+}
 </script>
 
 </body>
